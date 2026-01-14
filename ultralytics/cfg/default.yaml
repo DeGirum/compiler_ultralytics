@@ -50,6 +50,7 @@ dropout: 0.0 # (float) dropout for classification head (classify only)
 val: True # (bool) run validation/testing during training
 split: val # (str) dataset split to evaluate: 'val', 'test' or 'train'
 save_json: False # (bool) save results to COCO JSON for external evaluation
+anno_json: # (str, optional) path to ground truth annotations JSON file for COCO evaluation #DG
 conf: # (float, optional) confidence threshold; defaults: predict=0.25, val=0.001
 iou: 0.7 # (float) IoU threshold used for NMS
 max_det: 300 # (int) maximum number of detections per image
@@ -89,6 +90,10 @@ simplify: True # (bool) ONNX/engine only; run graph simplifier for cleaner ONNX 
 opset: # (int, optional) ONNX/engine only; opset version for export; leave unset to use a tested default
 workspace: # (float, optional) engine (TensorRT) only; workspace size in GiB, e.g. 4
 nms: False # (bool) fuse NMS into exported model when backend supports; if True, conf/iou apply (agnostic_nms except coreml)
+separate_outputs: False # (bool) export model with separate output tensors (no concatenation) #DG
+export_hw_optimized: False # (bool) optimize C2f block for faster hardware inference #DG
+uint8_io_dtype: False # (bool) uint8 for I/O dtypes in full int8 quantization #DG
+separate_pose: False # (bool) separate pose keypoint outputs (valid when separate_outputs=True) #DG
 
 # Hyperparameters ------------------------------------------------------------------------------------------------------
 lr0: 0.01 # (float) initial learning rate (SGD=1e-2, Adam/AdamW=1e-3)

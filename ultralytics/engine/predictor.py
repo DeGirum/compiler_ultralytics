@@ -146,6 +146,7 @@ class BasePredictor:
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
         self.txt_path = None
         self._lock = threading.Lock()  # for automatic thread-safe inference
+        self.separate_outputs = self.args.separate_outputs  # for hardware-optimized exports #DG
         callbacks.add_integration_callbacks(self)
 
     def preprocess(self, im: torch.Tensor | list[np.ndarray]) -> torch.Tensor:

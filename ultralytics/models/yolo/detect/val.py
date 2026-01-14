@@ -16,6 +16,7 @@ from ultralytics.utils import LOGGER, RANK, nms, ops
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
 from ultralytics.utils.plotting import plot_images
+from ultralytics.utils.postprocess_utils import decode_bbox  # DG
 
 
 class DetectionValidator(BaseValidator):
@@ -102,16 +103,19 @@ class DetectionValidator(BaseValidator):
         """Return a formatted string summarizing class metrics of YOLO model."""
         return ("%22s" + "%11s" * 6) % ("Class", "Images", "Instances", "Box(P", "R", "mAP50", "mAP50-95)")
 
-    def postprocess(self, preds: torch.Tensor) -> list[dict[str, torch.Tensor]]:
+    def postprocess(self, preds: torch.Tensor, img_shape: tuple = None) -> list[dict[str, torch.Tensor]]:
         """Apply Non-maximum suppression to prediction outputs.
 
         Args:
             preds (torch.Tensor): Raw predictions from the model.
+            img_shape (tuple): Input image shape for separate_outputs decoding.
 
         Returns:
             (list[dict[str, torch.Tensor]]): Processed predictions after NMS, where each dict contains 'bboxes', 'conf',
                 'cls', and 'extra' tensors.
         """
+        if self.separate_outputs:  # Hardware-optimized export with separated outputs #DG
+            preds = decode_bbox(preds, img_shape, self.device)
         outputs = nms.non_max_suppression(
             preds,
             self.args.conf,
@@ -442,6 +446,8 @@ class DetectionValidator(BaseValidator):
             / "annotations"
             / ("instances_val2017.json" if self.is_coco else f"lvis_v1_{self.args.split}.json")
         )  # annotations
+        if self.args.anno_json:  # DG: allow custom annotation file
+            anno_json = Path(self.args.anno_json)
         return self.coco_evaluate(stats, pred_json, anno_json)
 
     def coco_evaluate(
@@ -470,7 +476,7 @@ class DetectionValidator(BaseValidator):
         Returns:
             (dict[str, Any]): Updated stats dictionary containing the computed COCO/LVIS evaluation metrics.
         """
-        if self.args.save_json and (self.is_coco or self.is_lvis) and len(self.jdict):
+        if self.args.save_json and (self.is_coco or self.is_lvis or self.args.anno_json) and len(self.jdict):  # DG
             LOGGER.info(f"\nEvaluating faster-coco-eval mAP using {pred_json} and {anno_json}...")
             try:
                 for x in pred_json, anno_json:

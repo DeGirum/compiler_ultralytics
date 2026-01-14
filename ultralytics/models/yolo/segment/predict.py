@@ -1,8 +1,11 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
+import torch
+
 from ultralytics.engine.results import Results
 from ultralytics.models.yolo.detect.predict import DetectionPredictor
-from ultralytics.utils import DEFAULT_CFG, ops
+from ultralytics.utils import DEFAULT_CFG, nms, ops
+from ultralytics.utils.postprocess_utils import decode_bbox, separate_outputs_decode  # DG
 
 
 class SegmentationPredictor(DetectionPredictor):
@@ -59,9 +62,37 @@ class SegmentationPredictor(DetectionPredictor):
             >>> predictor = SegmentationPredictor(overrides=dict(model="yolo11n-seg.pt"))
             >>> results = predictor.postprocess(preds, img, orig_img)
         """
-        # Extract protos - tuple if PyTorch model or array if exported
-        protos = preds[0][-1] if isinstance(preds[0], tuple) else preds[-1]
-        return super().postprocess(preds[0], img, orig_imgs, protos=protos)
+        if self.separate_outputs:  # Hardware-optimized export with separated outputs #DG
+            pred_order, mask, proto = separate_outputs_decode(preds, self.args.task, 32, img.shape)
+            preds_decoded = decode_bbox(pred_order, img.shape, self.device)
+            nc = preds_decoded.shape[1] - 4
+            preds_decoded = torch.cat([preds_decoded, mask.permute(0, 2, 1)], 1)
+            p = nms.non_max_suppression(
+                preds_decoded,
+                self.args.conf,
+                self.args.iou,
+                agnostic=self.args.agnostic_nms,
+                max_det=self.args.max_det,
+                nc=nc,
+                classes=self.args.classes,
+            )
+        else:
+            p = nms.non_max_suppression(
+                preds[0],
+                self.args.conf,
+                self.args.iou,
+                agnostic=self.args.agnostic_nms,
+                max_det=self.args.max_det,
+                nc=len(self.model.names),
+                classes=self.args.classes,
+            )
+            # Extract protos - tuple if PyTorch model or array if exported
+            proto = preds[0][-1] if isinstance(preds[0], tuple) else preds[-1]
+
+        if not isinstance(orig_imgs, list):  # input images are a torch.Tensor, not a list
+            orig_imgs = ops.convert_torch2numpy_batch(orig_imgs)[..., ::-1]
+
+        return self.construct_results(p, img, orig_imgs, proto)
 
     def construct_results(self, preds, img, orig_imgs, protos):
         """Construct a list of result objects from the predictions.

@@ -10,9 +10,10 @@ import torch
 import torch.nn.functional as F
 
 from ultralytics.models.yolo.detect import DetectionValidator
-from ultralytics.utils import LOGGER, ops
+from ultralytics.utils import LOGGER, nms, ops
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import SegmentMetrics, mask_iou
+from ultralytics.utils.postprocess_utils import decode_bbox, separate_outputs_decode  # DG
 
 
 class SegmentationValidator(DetectionValidator):
@@ -90,21 +91,45 @@ class SegmentationValidator(DetectionValidator):
             "mAP50-95)",
         )
 
-    def postprocess(self, preds: list[torch.Tensor]) -> list[dict[str, torch.Tensor]]:
+    def postprocess(self, preds: list[torch.Tensor], img_shape: tuple = None) -> list[dict[str, torch.Tensor]]:
         """Post-process YOLO predictions and return output detections with proto.
 
         Args:
             preds (list[torch.Tensor]): Raw predictions from the model.
+            img_shape (tuple): Input image shape for separate_outputs decoding.
 
         Returns:
             list[dict[str, torch.Tensor]]: Processed detection predictions with masks.
         """
-        proto = (
-            preds[0][-1] if isinstance(preds[0], tuple) else preds[-1]
-        )  # second output is len 3 if pt, but only 1 if exported
-        preds = super().postprocess(preds[0])
+        if self.separate_outputs:  # Hardware-optimized export with separated outputs #DG
+            pred_order, mask, proto = separate_outputs_decode(preds, self.args.task, 32, img_shape)
+            preds_decoded = decode_bbox(pred_order, img_shape, self.device)
+            preds_decoded = torch.cat([preds_decoded, mask.permute(0, 2, 1)], 1)
+            outputs = nms.non_max_suppression(
+                preds_decoded,
+                self.args.conf,
+                self.args.iou,
+                multi_label=True,
+                agnostic=self.args.single_cls or self.args.agnostic_nms,
+                max_det=self.args.max_det,
+                nc=self.nc,
+            )
+        else:
+            proto = (
+                preds[0][-1] if isinstance(preds[0], tuple) else preds[-1]
+            )  # second output is len 3 if pt, but only 1 if exported
+            outputs = nms.non_max_suppression(
+                preds[0],
+                self.args.conf,
+                self.args.iou,
+                multi_label=True,
+                agnostic=self.args.single_cls or self.args.agnostic_nms,
+                max_det=self.args.max_det,
+                nc=self.nc,
+            )
         imgsz = [4 * x for x in proto.shape[2:]]  # get image size from proto
-        for i, pred in enumerate(preds):
+        processed = [{"bboxes": x[:, :4], "conf": x[:, 4], "cls": x[:, 5], "extra": x[:, 6:]} for x in outputs]
+        for i, pred in enumerate(processed):
             coefficient = pred.pop("extra")
             pred["masks"] = (
                 self.process(proto[i], coefficient, pred["bboxes"], shape=imgsz)
@@ -115,7 +140,7 @@ class SegmentationValidator(DetectionValidator):
                     device=pred["bboxes"].device,
                 )
             )
-        return preds
+        return processed
 
     def _prepare_batch(self, si: int, batch: dict[str, Any]) -> dict[str, Any]:
         """Prepare a batch for training or inference by processing images and targets.
@@ -306,4 +331,6 @@ class SegmentationValidator(DetectionValidator):
             / "annotations"
             / ("instances_val2017.json" if self.is_coco else f"lvis_v1_{self.args.split}.json")
         )  # annotations
+        if self.args.anno_json:  # DG: allow custom annotation file
+            anno_json = Path(self.args.anno_json)
         return super().coco_evaluate(stats, pred_json, anno_json, ["bbox", "segm"], suffix=["Box", "Mask"])

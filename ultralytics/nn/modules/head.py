@@ -74,6 +74,7 @@ class Detect(nn.Module):
     strides = torch.empty(0)  # init
     legacy = False  # backward compatibility for v3/v5/v8/v9 models
     xyxy = False  # xyxy or xywh output
+    separate_outputs = False  # export with separate output tensors (no concatenation) #DG
 
     def __init__(self, nc: int = 80, reg_max=16, end2end=False, ch: tuple = ()):
         """Initialize the YOLO detection layer with specified number of classes and channels.
@@ -142,6 +143,8 @@ class Detect(nn.Module):
         self, x: list[torch.Tensor]
     ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Concatenates and returns predicted bounding boxes and class probabilities."""
+        if self.separate_outputs and self.export:
+            return self._forward_separate_outputs(x)
         preds = self.forward_head(x, **self.one2many)
         if self.end2end:
             x_detach = [xi.detach() for xi in x]
@@ -153,6 +156,25 @@ class Detect(nn.Module):
         if self.end2end:
             y = self.postprocess(y.permute(0, 2, 1))
         return y if self.export else (y, preds)
+
+    def _forward_separate_outputs(self, x: list[torch.Tensor]) -> list[torch.Tensor]:  # DG
+        """Forward pass with separate output tensors for hardware-optimized export. #DG
+
+        Returns boxes and class probabilities as separate tensors per detection level,
+        formatted as: [boxes_l0, boxes_l1, boxes_l2, probs_l0, probs_l1, probs_l2]
+        """
+        cv2 = self.one2one_cv2 if self.end2end else self.cv2
+        cv3 = self.one2one_cv3 if self.end2end else self.cv3
+        boxes, probs = [], []
+        for i in range(self.nl):
+            a = cv2[i](x[i])
+            b = cv3[i](x[i])
+            boxes.append(a)
+            probs.append(b)
+        # Reshape to (batch, num_anchors, channels) format
+        return [
+            torch.permute(t, (0, 2, 3, 1)).reshape(t.shape[0], -1, t.shape[1]) for t in boxes + probs
+        ]
 
     def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode predicted bounding boxes and class probabilities based on multiple-level feature maps.
@@ -295,6 +317,8 @@ class Segment(Detect):
 
     def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor] | dict[str, torch.Tensor]:
         """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
+        if self.separate_outputs and self.export:
+            return self._forward_separate_outputs_segment(x)
         outputs = super().forward(x)
         preds = outputs[1] if isinstance(outputs, tuple) else outputs
         proto = self.proto(x[0])  # mask protos
@@ -307,6 +331,24 @@ class Segment(Detect):
         if self.training:
             return preds
         return (outputs, proto) if self.export else ((outputs[0], proto), preds)
+
+    def _forward_separate_outputs_segment(self, x: list[torch.Tensor]) -> tuple:  # DG
+        """Forward pass with separate output tensors for hardware-optimized export (segmentation). #DG
+
+        Returns detection outputs, mask coefficients per level, and flattened proto.
+        """
+        proto = self.proto(x[0])  # mask protos
+        bs = proto.shape[0]
+        cv4 = self.one2one_cv4 if self.end2end else self.cv4
+        # Get mask coefficients per level
+        mc = [torch.permute(cv4[i](x[i]), (0, 2, 3, 1)).reshape(bs, -1, self.nm) for i in range(self.nl)]
+        # Get detection outputs from parent
+        detect_outputs = Detect._forward_separate_outputs(self, x)
+        # Flatten proto: (B, C, H, W) -> (B, H*W, C)
+        proto_flat = proto.permute(0, 2, 3, 1)
+        proto_shape = proto_flat.shape
+        proto_flat = proto_flat.reshape(proto_shape[0], proto_shape[1] * proto_shape[2], proto_shape[3])
+        return detect_outputs, mc, proto_flat
 
     def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode predicted bounding boxes and class probabilities, concatenated with mask coefficients."""
@@ -499,6 +541,21 @@ class OBB(Detect):
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = self.cv4 = None
 
+    def _forward_separate_outputs(self, x: list[torch.Tensor]) -> list[torch.Tensor]:  # DG
+        """Forward pass with separate output tensors for hardware-optimized export (OBB). #DG
+
+        Returns detection outputs plus concatenated angle predictions.
+        """
+        cv4 = self.one2one_cv4 if self.end2end else self.cv4
+        # Get detection outputs from parent
+        detect_outputs = Detect._forward_separate_outputs(self, x)
+        # Concatenate angles
+        angle = torch.cat(
+            [torch.permute(cv4[i](x[i]), (0, 2, 3, 1)).reshape(x[i].shape[0], -1, self.ne) for i in range(self.nl)],
+            dim=1,
+        )
+        return detect_outputs + [angle]
+
 
 class OBB26(OBB):
     """YOLO26 OBB detection head for detection with rotation models. This class extends the OBB head with modified angle
@@ -543,6 +600,7 @@ class Pose(Detect):
         kpt_shape (tuple): Number of keypoints and dimensions (2 for x,y or 3 for x,y,visible).
         nk (int): Total number of keypoint values.
         cv4 (nn.ModuleList): Convolution layers for keypoint prediction.
+        separate_pose (bool): Export with separate keypoint outputs (valid when separate_outputs=True).
 
     Methods:
         forward: Perform forward pass through YOLO model and return predictions.
@@ -554,6 +612,8 @@ class Pose(Detect):
         >>> x = [torch.randn(1, 256, 80, 80), torch.randn(1, 512, 40, 40), torch.randn(1, 1024, 20, 20)]
         >>> outputs = pose(x)
     """
+
+    separate_pose = False  # export with separate keypoint outputs (valid when separate_outputs=True) #DG
 
     def __init__(self, nc: int = 80, kpt_shape: tuple = (17, 3), reg_max=16, end2end=False, ch: tuple = ()):
         """Initialize YOLO network with default parameters and Convolutional Layers.
@@ -619,6 +679,30 @@ class Pose(Detect):
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = self.cv4 = None
+
+    def _forward_separate_outputs(self, x: list[torch.Tensor]) -> list[torch.Tensor]:  # DG
+        """Forward pass with separate output tensors for hardware-optimized export (pose). #DG
+
+        If separate_pose is True, returns keypoints as separate tensors per level.
+        Otherwise, returns concatenated keypoints with detection outputs.
+        """
+        cv4 = self.one2one_cv4 if self.end2end else self.cv4
+        # Get detection outputs from parent
+        detect_outputs = Detect._forward_separate_outputs(self, x)
+        if self.separate_pose:
+            # Separate keypoints per level
+            kpts = [
+                torch.permute(cv4[i](x[i]), (0, 2, 3, 1)).reshape(x[i].shape[0], -1, self.nk)
+                for i in range(self.nl)
+            ]
+            return detect_outputs + kpts
+        else:
+            # Concatenate keypoints
+            kpts = torch.cat(
+                [torch.permute(cv4[i](x[i]), (0, 2, 3, 1)).reshape(x[i].shape[0], -1, self.nk) for i in range(self.nl)],
+                dim=1,
+            )
+            return detect_outputs + [kpts]
 
     def kpts_decode(self, kpts: torch.Tensor) -> torch.Tensor:
         """Decode keypoints from predictions."""
