@@ -3,6 +3,7 @@
 from ultralytics.engine.predictor import BasePredictor
 from ultralytics.engine.results import Results
 from ultralytics.utils import nms, ops
+from ultralytics.utils.postprocess_utils import decode_bbox  # DG
 
 
 class DetectionPredictor(BasePredictor):
@@ -51,6 +52,8 @@ class DetectionPredictor(BasePredictor):
             >>> processed_results = predictor.postprocess(preds, img, orig_imgs)
         """
         save_feats = getattr(self, "_feats", None) is not None
+        if self.separate_outputs:  # Hardware-optimized export with separated outputs #DG
+            preds = decode_bbox(preds, img.shape, self.device)
         preds = nms.non_max_suppression(
             preds,
             self.args.conf,

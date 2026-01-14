@@ -318,6 +318,54 @@ class C2f(nn.Module):
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
 
+    def forward_hw_optimized(self, x: torch.Tensor) -> torch.Tensor:  # DG
+        """Forward pass optimized for hardware inference (avoids chunk/split). #DG
+
+        This method creates separate cv1_1 and cv1_2 convolutions to replace the chunked cv1 output,
+        which provides better compatibility with certain hardware accelerators.
+        """
+        # Create cv1_1 and cv1_2 fused convs if they don't exist
+        if not hasattr(self, "cv1_1") or not hasattr(self, "cv1_2"):
+            Conv.default_act = self.cv1.act
+            self.cv1_1 = (
+                Conv(self.cv1.conv.in_channels, self.c, 1, 1)
+                .requires_grad_(False)
+                .to(self.cv1.conv.weight.device)
+                .eval()
+            )
+            self.cv1_2 = (
+                Conv(self.cv1.conv.in_channels, self.c, 1, 1)
+                .requires_grad_(False)
+                .to(self.cv1.conv.weight.device)
+                .eval()
+            )
+            if not hasattr(self.cv1, "bn"):
+                self.cv1_1.conv = fuse_conv_and_bn(self.cv1_1.conv, self.cv1_1.bn)
+                self.cv1_2.conv = fuse_conv_and_bn(self.cv1_2.conv, self.cv1_2.bn)
+                delattr(self.cv1_1, "bn")
+                delattr(self.cv1_2, "bn")
+                self.cv1_1.forward = self.cv1_1.forward_fuse
+                self.cv1_2.forward = self.cv1_2.forward_fuse
+            else:
+                raise SystemError("forward_hw_optimized must only be called after fusing")
+
+        # Load weights from cv1 into cv1_1 and cv1_2
+        cv1_1_dict, cv1_2_dict = {}, {}
+        state_dict = self.cv1.state_dict()
+        weight = state_dict["conv.weight"]
+        bias = state_dict["conv.bias"]
+        cv1_1_dict["conv.weight"] = weight[: self.c, :, :, :]
+        cv1_2_dict["conv.weight"] = weight[self.c :, :, :, :]
+        cv1_1_dict["conv.bias"] = bias[: self.c]
+        cv1_2_dict["conv.bias"] = bias[self.c :]
+        self.cv1_1.load_state_dict(cv1_1_dict, strict=True)
+        self.cv1_2.load_state_dict(cv1_2_dict, strict=True)
+
+        # Forward pass: split replacement using separate convolutions
+        y = [self.cv1_1(x), self.cv1_2(x)]
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
 
 class C3(nn.Module):
     """CSP Bottleneck with 3 convolutions."""

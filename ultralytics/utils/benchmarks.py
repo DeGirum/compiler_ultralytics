@@ -161,6 +161,11 @@ def benchmark(
                 assert cpu, "inference not supported on CPU"
             if "cuda" in device.type:
                 assert gpu, "inference not supported on GPU"
+            # Skip incompatible formats for separate_outputs and export_hw_optimized #DG
+            if format in ("-", "torchscript", "saved_model", "pb", "ncnn") and kwargs.get("separate_outputs", False):
+                continue
+            if format in ("coreml", "paddle", "ncnn") and kwargs.get("export_hw_optimized", False):
+                continue
 
             # Export
             if format == "-":
@@ -181,7 +186,14 @@ def benchmark(
             assert format != "coreml" or platform.system() == "Darwin", "inference only supported on macOS>=10.13"
             if format == "ncnn":
                 assert not is_end2end, "End-to-end torch.topk operation is not supported for NCNN prediction yet"
-            exported_model.predict(ASSETS / "bus.jpg", imgsz=imgsz, device=device, half=half, verbose=False)
+            exported_model.predict(
+                ASSETS / "bus.jpg",
+                imgsz=imgsz,
+                device=device,
+                half=half,
+                verbose=False,
+                separate_outputs=kwargs.get("separate_outputs", False),  # DG
+            )
 
             # Validate
             results = exported_model.val(
@@ -194,6 +206,7 @@ def benchmark(
                 int8=int8,
                 verbose=False,
                 conf=0.001,  # all the pre-set benchmark mAP values are based on conf=0.001
+                separate_outputs=kwargs.get("separate_outputs", False),  # DG
             )
             metric, speed = results.results_dict[key], results.speed["inference"]
             fps = round(1000 / (speed + eps), 2)  # frames per second

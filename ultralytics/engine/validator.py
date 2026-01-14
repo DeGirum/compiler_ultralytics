@@ -126,6 +126,7 @@ class BaseValidator:
 
         self.plots = {}
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
+        self.separate_outputs = self.args.separate_outputs  # for hardware-optimized exports #DG
 
     @smart_inference_mode()
     def __call__(self, trainer=None, model=None):
@@ -218,7 +219,7 @@ class BaseValidator:
 
             # Postprocess
             with dt[3]:
-                preds = self.postprocess(preds)
+                preds = self.postprocess(preds, batch["img"][0].shape)  # DG: added img_shape param
 
             self.update_metrics(preds, batch)
             if self.args.plots and batch_i < 3 and RANK in {-1, 0}:

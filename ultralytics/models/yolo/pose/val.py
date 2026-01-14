@@ -9,8 +9,9 @@ import numpy as np
 import torch
 
 from ultralytics.models.yolo.detect import DetectionValidator
-from ultralytics.utils import ops
+from ultralytics.utils import nms, ops
 from ultralytics.utils.metrics import OKS_SIGMA, PoseMetrics, kpt_iou
+from ultralytics.utils.postprocess_utils import decode_bbox, decode_kpts, separate_outputs_decode  # DG
 
 
 class PoseValidator(DetectionValidator):
@@ -104,7 +105,7 @@ class PoseValidator(DetectionValidator):
         nkpt = self.kpt_shape[0]
         self.sigma = OKS_SIGMA if is_pose else np.ones(nkpt) / nkpt
 
-    def postprocess(self, preds: torch.Tensor) -> dict[str, torch.Tensor]:
+    def postprocess(self, preds: torch.Tensor, img_shape: tuple = None) -> dict[str, torch.Tensor]:
         """Postprocess YOLO predictions to extract and reshape keypoints for pose estimation.
 
         This method extends the parent class postprocessing by extracting keypoints from the 'extra' field of
@@ -114,6 +115,7 @@ class PoseValidator(DetectionValidator):
         Args:
             preds (torch.Tensor): Raw prediction tensor from the YOLO pose model containing bounding boxes, confidence
                 scores, class predictions, and keypoint data.
+            img_shape (tuple): Input image shape for separate_outputs decoding.
 
         Returns:
             (dict[torch.Tensor]): Dict of processed prediction dictionaries, each containing:
@@ -127,10 +129,37 @@ class PoseValidator(DetectionValidator):
             to the next one. The keypoints are extracted from the 'extra' field which contains additional
             task-specific data beyond basic detection.
         """
-        preds = super().postprocess(preds)
-        for pred in preds:
+        if self.separate_outputs:  # Hardware-optimized export with separated outputs #DG
+            pred_order, nkpt = separate_outputs_decode(preds, self.args.task, self.kpt_shape[0] * self.kpt_shape[1])
+            pred_decoded = decode_bbox(pred_order, img_shape, self.device)
+            kpt_shape = (nkpt.shape[-1] // 3, 3)
+            kpts_decoded = decode_kpts(
+                pred_order, img_shape, torch.permute(nkpt, (0, 2, 1)), kpt_shape, self.device, bs=1
+            )
+            preds = torch.cat([pred_decoded, kpts_decoded], 1)
+            outputs = nms.non_max_suppression(
+                preds,
+                self.args.conf,
+                self.args.iou,
+                multi_label=True,
+                agnostic=self.args.single_cls or self.args.agnostic_nms,
+                max_det=self.args.max_det,
+                nc=self.nc,
+            )
+        else:
+            outputs = nms.non_max_suppression(
+                preds,
+                self.args.conf,
+                self.args.iou,
+                multi_label=True,
+                agnostic=self.args.single_cls or self.args.agnostic_nms,
+                max_det=self.args.max_det,
+                nc=self.nc,
+            )
+        processed = [{"bboxes": x[:, :4], "conf": x[:, 4], "cls": x[:, 5], "extra": x[:, 6:]} for x in outputs]
+        for pred in processed:
             pred["keypoints"] = pred.pop("extra").view(-1, *self.kpt_shape)  # remove extra if exists
-        return preds
+        return processed
 
     def _prepare_batch(self, si: int, batch: dict[str, Any]) -> dict[str, Any]:
         """Prepare a batch for processing by converting keypoints to float and scaling to original dimensions.
@@ -244,5 +273,7 @@ class PoseValidator(DetectionValidator):
     def eval_json(self, stats: dict[str, Any]) -> dict[str, Any]:
         """Evaluate object detection model using COCO JSON format."""
         anno_json = self.data["path"] / "annotations/person_keypoints_val2017.json"  # annotations
+        if self.args.anno_json:  # DG: allow custom annotation file
+            anno_json = Path(self.args.anno_json)
         pred_json = self.save_dir / "predictions.json"  # predictions
         return super().coco_evaluate(stats, pred_json, anno_json, ["bbox", "keypoints"], suffix=["Box", "Pose"])

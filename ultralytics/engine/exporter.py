@@ -463,6 +463,20 @@ class Exporter:
             )
         if tfjs and (ARM64 and LINUX):
             raise SystemError("TF.js exports are not currently supported on ARM64 Linux")
+        # Validate separate_outputs compatibility #DG
+        if self.args.separate_outputs:
+            incompatible = ["-", "torchscript", "saved_model", "pb", "ncnn"]
+            if fmt in incompatible or jit or saved_model or pb or ncnn:
+                raise ValueError(
+                    f"separate_outputs=True is not compatible with formats: {incompatible}. Got format='{fmt}'."
+                )
+        # Validate export_hw_optimized compatibility #DG
+        if self.args.export_hw_optimized:
+            incompatible = ["coreml", "paddle", "ncnn"]
+            if fmt in incompatible or coreml or paddle or ncnn:
+                raise ValueError(
+                    f"export_hw_optimized=True is not compatible with formats: {incompatible}. Got format='{fmt}'."
+                )
         if ncnn and hasattr(model.model[-1], "one2one_cv2"):
             del model.model[-1].one2one_cv2  # Disable end2end branch for NCNN export as it does not support topk
             LOGGER.warning("NCNN export does not support end2end models, disabling end2end branch.")
@@ -499,6 +513,8 @@ class Exporter:
             from ultralytics.utils.export.tensorflow import tf_wrapper
 
             model = tf_wrapper(model)
+        from ultralytics.nn.modules.head import Pose
+
         for m in model.modules():
             if isinstance(m, Classify):
                 m.export = True
@@ -513,9 +529,16 @@ class Exporter:
                 m.shape = None  # reset cached shape for new export input size
                 if hasattr(model, "pe") and hasattr(m, "fuse"):  # for YOLOE models
                     m.fuse(model.pe.to(self.device))
+                # Apply separate_outputs settings #DG
+                m.separate_outputs = self.args.separate_outputs
+                if isinstance(m, Pose):
+                    m.separate_pose = self.args.separate_pose
             elif isinstance(m, C2f) and not is_tf_format:
                 # EdgeTPU does not support FlexSplitV while split provides cleaner ONNX graph
-                m.forward = m.forward_split
+                if self.args.export_hw_optimized:  # DG
+                    m.forward = m.forward_hw_optimized
+                else:
+                    m.forward = m.forward_split
 
         y = None
         for _ in range(2):  # dry runs

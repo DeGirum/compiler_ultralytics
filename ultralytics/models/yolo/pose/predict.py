@@ -1,7 +1,11 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
+import torch
+
+from ultralytics.engine.results import Results
 from ultralytics.models.yolo.detect.predict import DetectionPredictor
-from ultralytics.utils import DEFAULT_CFG, ops
+from ultralytics.utils import DEFAULT_CFG, nms, ops
+from ultralytics.utils.postprocess_utils import decode_bbox, decode_kpts, separate_outputs_decode  # DG
 
 
 class PosePredictor(DetectionPredictor):
@@ -38,6 +42,68 @@ class PosePredictor(DetectionPredictor):
         """
         super().__init__(cfg, overrides, _callbacks)
         self.args.task = "pose"
+
+    def postprocess(self, preds, img, orig_imgs, **kwargs):  # DG
+        """Post-process predictions and return a list of Results objects. #DG
+
+        This method handles both standard and separate_outputs format predictions.
+
+        Args:
+            preds (torch.Tensor): Raw predictions from the model.
+            img (torch.Tensor): Processed input image tensor in model input format.
+            orig_imgs (torch.Tensor | list): Original input images before preprocessing.
+            **kwargs (Any): Additional keyword arguments.
+
+        Returns:
+            (list): List of Results objects containing the post-processed predictions.
+        """
+        save_feats = getattr(self, "_feats", None) is not None
+        if self.separate_outputs:  # Hardware-optimized export with separated outputs #DG
+            pred_order, nkpt = separate_outputs_decode(
+                preds, self.args.task, self.model.kpt_shape[0] * self.model.kpt_shape[1]
+            )
+            pred_decoded = decode_bbox(pred_order, img.shape, self.device)
+            nc = pred_decoded.shape[1] - 4
+            kpt_shape = (nkpt.shape[-1] // 3, 3)
+            kpts_decoded = decode_kpts(
+                pred_order, img.shape, torch.permute(nkpt, (0, 2, 1)), kpt_shape, self.device, bs=1
+            )
+            pred_order = torch.cat([pred_decoded, kpts_decoded], 1)
+            preds = nms.non_max_suppression(
+                pred_order,
+                self.args.conf,
+                self.args.iou,
+                agnostic=self.args.agnostic_nms,
+                max_det=self.args.max_det,
+                classes=self.args.classes,
+                nc=nc,
+            )
+        else:
+            preds = nms.non_max_suppression(
+                preds,
+                self.args.conf,
+                self.args.iou,
+                agnostic=self.args.agnostic_nms,
+                max_det=self.args.max_det,
+                classes=self.args.classes,
+                nc=len(self.model.names),
+                return_idxs=save_feats,
+            )
+
+        if not isinstance(orig_imgs, list):  # input images are a torch.Tensor, not a list
+            orig_imgs = ops.convert_torch2numpy_batch(orig_imgs)[..., ::-1]
+
+        if save_feats:
+            obj_feats = self.get_obj_feats(self._feats, preds[1])
+            preds = preds[0]
+
+        results = self.construct_results(preds, img, orig_imgs, **kwargs)
+
+        if save_feats:
+            for r, f in zip(results, obj_feats):
+                r.feats = f  # add object features to results
+
+        return results
 
     def construct_result(self, pred, img, orig_img, img_path):
         """Construct the result object from the prediction, including keypoints.
