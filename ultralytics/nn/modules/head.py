@@ -544,17 +544,15 @@ class OBB(Detect):
     def _forward_separate_outputs(self, x: list[torch.Tensor]) -> list[torch.Tensor]:  # DG
         """Forward pass with separate output tensors for hardware-optimized export (OBB). #DG
 
-        Returns detection outputs plus concatenated angle predictions.
+        Returns detection outputs plus separate angle tensors per level.
         """
+        bs = x[0].shape[0]  # batch size
         cv4 = self.one2one_cv4 if self.end2end else self.cv4
         # Get detection outputs from parent
         detect_outputs = Detect._forward_separate_outputs(self, x)
-        # Concatenate angles
-        angle = torch.cat(
-            [torch.permute(cv4[i](x[i]), (0, 2, 3, 1)).reshape(x[i].shape[0], -1, self.ne) for i in range(self.nl)],
-            dim=1,
-        )
-        return detect_outputs + [angle]
+        # Separate angles per level
+        angles = [cv4[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)]
+        return detect_outputs + angles
 
 
 class OBB26(OBB):
