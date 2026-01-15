@@ -818,6 +818,35 @@ class Pose26(Pose):
         super().fuse()
         self.cv4_kpts = self.cv4_sigma = self.flow_model = self.one2one_cv4_sigma = None
 
+    def _forward_separate_outputs(self, x: list[torch.Tensor]) -> list[torch.Tensor]:  # DG
+        """Forward pass with separate output tensors for hardware-optimized export (Pose26).
+
+        Uses cv4 for feature extraction and cv4_kpts for keypoint prediction.
+        If separate_pose is True, returns keypoints as separate tensors per level.
+        Otherwise, returns concatenated keypoints with detection outputs.
+        """
+        bs = x[0].shape[0]  # batch size
+        cv4 = self.one2one_cv4 if self.end2end else self.cv4
+        cv4_kpts = self.one2one_cv4_kpts if self.end2end else self.cv4_kpts
+        # Get detection outputs from parent
+        detect_outputs = Detect._forward_separate_outputs(self, x)
+        # Extract features through cv4, then get keypoints through cv4_kpts
+        features = [cv4[i](x[i]) for i in range(self.nl)]
+        if self.separate_pose:
+            # Separate keypoints per level
+            kpts = [
+                torch.permute(cv4_kpts[i](features[i]), (0, 2, 3, 1)).reshape(bs, -1, self.nk)
+                for i in range(self.nl)
+            ]
+            return detect_outputs + kpts
+        else:
+            # Concatenate keypoints
+            kpts = torch.cat(
+                [torch.permute(cv4_kpts[i](features[i]), (0, 2, 3, 1)).reshape(bs, -1, self.nk) for i in range(self.nl)],
+                dim=1,
+            )
+            return detect_outputs + [kpts]
+
     def kpts_decode(self, kpts: torch.Tensor) -> torch.Tensor:
         """Decode keypoints from predictions."""
         ndim = self.kpt_shape[1]
