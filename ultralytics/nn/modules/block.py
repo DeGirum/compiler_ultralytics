@@ -97,8 +97,14 @@ class Proto(nn.Module):
         self.cv2 = Conv(c_, c_, k=3)
         self.cv3 = Conv(c_, c2)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Perform a forward pass through layers using an upsampled input image."""
+    def forward(self, x: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
+        """Perform a forward pass through layers using an upsampled input image.
+
+        Args:
+            x: Input tensor or list of tensors. If list, only the first element (P3 features) is used.
+        """
+        if isinstance(x, list):
+            x = x[0]  # Proto only uses the first feature level (P3)
         return self.cv3(self.cv2(self.upsample(self.cv1(x))))
 
 

@@ -321,7 +321,7 @@ class Segment(Detect):
             return self._forward_separate_outputs_segment(x)
         outputs = super().forward(x)
         preds = outputs[1] if isinstance(outputs, tuple) else outputs
-        proto = self.proto(x[0])  # mask protos
+        proto = self.proto(x)  # mask protos (Proto accepts list, uses x[0])
         if isinstance(preds, dict):  # training and validating during training
             if self.end2end:
                 preds["one2many"]["proto"] = proto
@@ -337,7 +337,7 @@ class Segment(Detect):
 
         Returns detection outputs, mask coefficients per level, and flattened proto.
         """
-        proto = self.proto(x[0])  # mask protos
+        proto = self.proto(x)  # mask protos (Proto accepts list, uses x[0]; Proto26 uses all levels)
         bs = proto.shape[0]
         cv4 = self.one2one_cv4 if self.end2end else self.cv4
         # Get mask coefficients per level
@@ -424,6 +424,8 @@ class Segment26(Segment):
 
     def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor] | dict[str, torch.Tensor]:
         """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
+        if self.separate_outputs and self.export:
+            return self._forward_separate_outputs_segment(x)
         outputs = Detect.forward(self, x)
         preds = outputs[1] if isinstance(outputs, tuple) else outputs
         proto = self.proto(x)  # mask protos
@@ -438,6 +440,8 @@ class Segment26(Segment):
         if self.training:
             return preds
         return (outputs, proto) if self.export else ((outputs[0], proto), preds)
+
+    # _forward_separate_outputs_segment is inherited from Segment (Proto26.forward accepts list like Proto)
 
     def fuse(self) -> None:
         """Remove the one2many head and extra part of proto module for inference optimization."""
@@ -1384,7 +1388,7 @@ class YOLOESegment(YOLOEDetect):
         """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
         outputs = super().forward(x)
         preds = outputs[1] if isinstance(outputs, tuple) else outputs
-        proto = self.proto(x[0])  # mask protos
+        proto = self.proto(x)  # mask protos (Proto accepts list, uses x[0])
         if isinstance(preds, dict):  # training and validating during training
             if self.end2end:
                 preds["one2many"]["proto"] = proto
