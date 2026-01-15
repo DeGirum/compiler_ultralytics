@@ -332,10 +332,12 @@ class Segment(Detect):
             return preds
         return (outputs, proto) if self.export else ((outputs[0], proto), preds)
 
-    def _forward_separate_outputs_segment(self, x: list[torch.Tensor]) -> tuple:  # DG
+    def _forward_separate_outputs_segment(self, x: list[torch.Tensor]) -> list[torch.Tensor]:  # DG
         """Forward pass with separate output tensors for hardware-optimized export (segmentation). #DG
 
-        Returns detection outputs, mask coefficients per level, and flattened proto.
+        Returns detection outputs (6 tensors), mask coefficients per level (3 tensors), and flattened proto (1 tensor).
+        Format: [boxes_l0, boxes_l1, boxes_l2, probs_l0, probs_l1, probs_l2, mc_l0, mc_l1, mc_l2, proto]
+        Total: 10 outputs for YOLOv8 Segmentation postprocessor.
         """
         proto = self.proto(x)  # mask protos (Proto accepts list, uses x[0]; Proto26 uses all levels)
         bs = proto.shape[0]
@@ -348,7 +350,8 @@ class Segment(Detect):
         proto_flat = proto.permute(0, 2, 3, 1)
         proto_shape = proto_flat.shape
         proto_flat = proto_flat.reshape(proto_shape[0], proto_shape[1] * proto_shape[2], proto_shape[3])
-        return detect_outputs, mc, proto_flat
+        # Return flat list: detect_outputs (6) + mc (3) + proto (1) = 10 outputs
+        return detect_outputs + mc + [proto_flat]
 
     def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode predicted bounding boxes and class probabilities, concatenated with mask coefficients."""
