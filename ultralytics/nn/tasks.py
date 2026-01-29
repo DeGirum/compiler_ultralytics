@@ -1435,7 +1435,28 @@ def torch_safe_load(weight, safe_only=False):
                     ckpt = torch_load(f, pickle_module=safe_pickle)
             else:
                 ckpt = torch_load(file, map_location="cpu")
-
+            if safe_only:
+                # Load via custom pickle module
+                win_pickle = types.ModuleType("safe_pickle")
+                win_pickle.Unpickler = SafeUnpickler
+                win_pickle.load = lambda file_obj: SafeUnpickler(file_obj).load()
+                with open(file, "rb") as f:
+                    ckpt = torch.load(f, pickle_module=win_pickle)
+            else:
+                class WindowsUnpickler(pickle.Unpickler):
+                    """Custom Unpickler that handles Windows paths."""
+                    def find_class(self, module, name):
+                        """Override to handle Windows paths."""
+                        if module == "pathlib":
+                            if name == "WindowsPath":
+                                return super().find_class("pathlib", "PosixPath")
+                        return super().find_class(module, name)
+                    
+                win_pickle = types.ModuleType("win_pickle")
+                win_pickle.Unpickler = WindowsUnpickler
+                win_pickle.load = lambda file_obj: WindowsUnpickler(file_obj).load()
+    
+                ckpt = torch.load(file, pickle_module=win_pickle, map_location="cpu")
     except ModuleNotFoundError as e:  # e.name is missing module name
         if e.name == "models":
             raise TypeError(
