@@ -1387,9 +1387,13 @@ class YOLOESegment(YOLOEDetect):
             y = self.postprocess(y.permute(0, 2, 1))
         return y if self.export else (y, preds)
 
-    def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor] | dict[str, torch.Tensor]:
+   def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor] | dict[str, torch.Tensor]:
         """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
         outputs = super().forward(x)
+
+        if self.separate_outputs and self.export:
+            return outputs
+
         preds = outputs[1] if isinstance(outputs, tuple) else outputs
         proto = self.proto(x)  # mask protos (Proto accepts list, uses x[0])
         if isinstance(preds, dict):  # training and validating during training
@@ -1401,6 +1405,23 @@ class YOLOESegment(YOLOEDetect):
         if self.training:
             return preds
         return (outputs, proto) if self.export else ((outputs[0], proto), preds)
+
+    def _forward_separate_outputs(self, x: list[torch.Tensor]) -> list[torch.Tensor]:  # DG
+        det_outputs = super()._forward_separate_outputs(x)
+        p = self.proto(x)
+        bs = p.shape[0]
+
+        if getattr(self, 'end2end', False):
+            mask_head = self.one2one['mask_head']
+        else:
+            mask_head = self.cv5
+        
+        mc = [torch.permute(mask_head[i](x[i]), (0, 2, 3, 1)).reshape(bs, -1, self.nm) for i in range(self.nl)]
+        
+        p = p.permute(0, 2, 3, 1)
+        proto_shape = p.shape
+        p = p.reshape(proto_shape[0], proto_shape[1] * proto_shape[2], proto_shape[3])
+        return [*det_outputs, *mc, p]
 
     def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode predicted bounding boxes and class probabilities, concatenated with mask coefficients."""
@@ -1498,6 +1519,9 @@ class YOLOESegment26(YOLOESegment):
     def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor] | dict[str, torch.Tensor]:
         """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
         outputs = YOLOEDetect.forward(self, x)
+        if self.separate_outputs and self.export:
+            return outputs
+
         preds = outputs[1] if isinstance(outputs, tuple) else outputs
         proto = self.proto([xi.detach() for xi in x], return_semseg=False)  # mask protos
 
@@ -1510,6 +1534,23 @@ class YOLOESegment26(YOLOESegment):
         if self.training:
             return preds
         return (outputs, proto) if self.export else ((outputs[0], proto), preds)
+
+    def _forward_separate_outputs(self, x: list[torch.Tensor]) -> list[torch.Tensor]:  # DG
+        det_outputs = super(YOLOESegment, self)._forward_separate_outputs(x)
+        p = self.proto(x, return_semseg=False)
+        bs = p.shape[0]
+
+        if getattr(self, 'end2end', False):
+            mask_head = self.one2one['mask_head']
+        else:
+            mask_head = self.cv5
+        
+        mc = [torch.permute(mask_head[i](x[i]), (0, 2, 3, 1)).reshape(bs, -1, self.nm) for i in range(self.nl)]
+        
+        p = p.permute(0, 2, 3, 1)
+        proto_shape = p.shape
+        p = p.reshape(proto_shape[0], proto_shape[1] * proto_shape[2], proto_shape[3])
+        return [*det_outputs, *mc, p]
 
 
 class RTDETRDecoder(nn.Module):
