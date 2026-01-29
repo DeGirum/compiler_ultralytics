@@ -1387,7 +1387,7 @@ class YOLOESegment(YOLOEDetect):
             y = self.postprocess(y.permute(0, 2, 1))
         return y if self.export else (y, preds)
 
-   def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor] | dict[str, torch.Tensor]:
+    def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor] | dict[str, torch.Tensor]:
         """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
         outputs = super().forward(x)
 
